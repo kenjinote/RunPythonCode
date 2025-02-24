@@ -13,7 +13,8 @@ TCHAR szClassName[] = TEXT("Window");
 
 std::mutex cout_mutex;
 
-LPWSTR handle_python_error(const std::string& script) {
+LPWSTR handle_python_error(const std::string& script)
+{
 	PyObject* type = nullptr, * value = nullptr, * traceback = nullptr;
 	PyErr_Fetch(&type, &value, &traceback);
 	PyErr_NormalizeException(&type, &value, &traceback);
@@ -78,6 +79,23 @@ LPWSTR handle_python_error(const std::string& script) {
 			Py_XDECREF(tb_module);
 		}
 	}
+
+	// トレースバックの改行コード変換
+	auto convert_newlines = [](std::string& s) {
+		size_t pos = 0;
+		while ((pos = s.find('\n', pos)) != std::string::npos) {
+			if (pos == 0 || s[pos - 1] != '\r') {
+				s.replace(pos, 1, "\r\n");
+				pos += 2;
+			}
+			else {
+				pos++;
+			}
+		}
+	};
+
+	convert_newlines(error_source_line);
+	convert_newlines(formatted_trace);
 
 	std::string str =
 		std::string("=== Python Error ===\r\nType: ") + error_type
@@ -177,19 +195,15 @@ void run_python_script(LPCSTR lpszSrc, HWND hWnd)
 		std::lock_guard<std::mutex> lock(cout_mutex);
 		HWND hEdit = GetDlgItem(hWnd, 1001);
 		if (hEdit) {
-			LPWSTR szResult = handle_python_error(lpszSrc);
-			if (szResult) {
-				SetWindowText(hEdit, szResult);
-				delete[] szResult;
-			}
-			else {
+			LPWSTR lpszResult = handle_python_error(lpszSrc);
+			if (!lpszResult) {
 				LPCSTR what = e.what();
 				DWORD dwSize = MultiByteToWideChar(CP_UTF8, 0, what, -1, 0, 0);
-				WCHAR* szResult = new WCHAR[dwSize];
-				MultiByteToWideChar(CP_UTF8, 0, what, -1, szResult, dwSize);
-				SetWindowText(hEdit, szResult);
-				delete[] szResult;
+				lpszResult = new WCHAR[dwSize];
+				MultiByteToWideChar(CP_UTF8, 0, what, -1, lpszResult, dwSize);
 			}
+			SetWindowText(hEdit, lpszResult);
+			delete[] lpszResult;
 		}
 	}
 
@@ -249,8 +263,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		Py_Initialize();
 		PyEval_InitThreads();
 		hButton = CreateWindow(TEXT("BUTTON"), TEXT("実行(F5)"), WS_VISIBLE | WS_CHILD, 0, 0, 0, 0, hWnd, (HMENU)IDOK, ((LPCREATESTRUCT)lParam)->hInstance, 0);
-		hEdit1 = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), 0, WS_VISIBLE | WS_CHILD | ES_MULTILINE | ES_AUTOHSCROLL | ES_AUTOVSCROLL, 0, 0, 0, 0, hWnd, (HMENU)1000, ((LPCREATESTRUCT)lParam)->hInstance, 0);
-		hEdit2 = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), 0, WS_VISIBLE | WS_CHILD | ES_MULTILINE | ES_AUTOHSCROLL | ES_AUTOVSCROLL | ES_READONLY, 0, 0, 0, 0, hWnd, (HMENU)1001, ((LPCREATESTRUCT)lParam)->hInstance, 0);
+		hEdit1 = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), 0, WS_VISIBLE | WS_CHILD | WS_HSCROLL | WS_VSCROLL | ES_MULTILINE | ES_AUTOHSCROLL | ES_AUTOVSCROLL, 0, 0, 0, 0, hWnd, (HMENU)1000, ((LPCREATESTRUCT)lParam)->hInstance, 0);
+		hEdit2 = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), 0, WS_VISIBLE | WS_CHILD | WS_HSCROLL | WS_VSCROLL | ES_MULTILINE | ES_AUTOHSCROLL | ES_AUTOVSCROLL | ES_READONLY, 0, 0, 0, 0, hWnd, (HMENU)1001, ((LPCREATESTRUCT)lParam)->hInstance, 0);
 		break;
 	case WM_SETFOCUS:
 		SetFocus(hEdit1);
@@ -278,6 +292,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		EnableWindow(hButton, TRUE);
 		EnableWindow(hEdit1, TRUE);
 		EnableWindow(hEdit2, TRUE);
+		SetFocus(hEdit1);
 		break;
 	case WM_DESTROY:
 		Py_Finalize();
