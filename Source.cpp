@@ -3,6 +3,8 @@
 #include <iostream>
 #include <vector>
 #include <thread>
+#include <sstream>
+#include <string>
 #include <mutex>
 #include <windows.h>
 #include <Python.h>
@@ -10,6 +12,94 @@
 TCHAR szClassName[] = TEXT("Window");
 
 std::mutex cout_mutex;
+
+LPWSTR handle_python_error(const std::string& script) {
+	PyObject* type = nullptr, * value = nullptr, * traceback = nullptr;
+	PyErr_Fetch(&type, &value, &traceback);
+	PyErr_NormalizeException(&type, &value, &traceback);
+
+	if (!type) {
+		std::cerr << "Unknown error occurred" << std::endl;
+		return nullptr;
+	}
+
+	// 例外基本情報
+	PyObject* type_name = PyObject_GetAttrString(type, "__name__");
+	const char* error_type = PyUnicode_AsUTF8(type_name);
+	PyObject* error_msg = PyObject_Str(value);
+	const char* msg_str = PyUnicode_AsUTF8(error_msg);
+
+	// 行番号とソースコード行の取得
+	int error_line = -1;
+	std::string error_source_line;
+	std::string formatted_trace;  // トレースバック情報を格納するstring
+
+	if (traceback) {
+		PyObject* tb_module = PyImport_ImportModule("traceback");
+		if (tb_module) {
+			PyObject* format_func = PyObject_GetAttrString(tb_module, "format_exception");
+			if (format_func && PyCallable_Check(format_func)) {
+				PyObject* args = PyTuple_Pack(3, type, value, traceback);
+				if (args) {
+					PyObject* formatted = PyObject_CallObject(format_func, args);
+					if (formatted) {
+						PyObject* joined = PyUnicode_Join(PyUnicode_FromString(""), formatted);
+						if (joined) {
+							const char* trace_cstr = PyUnicode_AsUTF8(joined);
+							if (trace_cstr) {
+								formatted_trace = trace_cstr;  // stringにコピー
+
+								// 行番号解析
+								std::istringstream iss(formatted_trace);
+								std::string line;
+								while (std::getline(iss, line)) {
+									size_t pos = line.find("File \"<string>\", line ");
+									if (pos != std::string::npos) {
+										pos += 22;
+										error_line = std::stoi(line.substr(pos));
+
+										// ソースコード行の抽出
+										std::istringstream script_stream(script);
+										for (int i = 0; i < error_line; ++i) {
+											std::getline(script_stream, error_source_line);
+										}
+										break;
+									}
+								}
+							}
+							Py_XDECREF(joined);
+						}
+						Py_XDECREF(formatted);
+					}
+					Py_XDECREF(args);
+				}
+			}
+			Py_XDECREF(format_func);
+			Py_XDECREF(tb_module);
+		}
+	}
+
+	std::string str =
+		std::string("=== Python Error ===\r\nType: ") + error_type
+		+ "\r\nMessage: " + msg_str
+		+ "\r\nLine: " + std::to_string(error_line)
+		+ "\r\nSource: " + error_source_line
+		+ "\r\nFull Traceback:\r\n" + formatted_trace;
+
+	// リソース解放
+	Py_XDECREF(type_name);
+	Py_XDECREF(error_msg);
+	Py_XDECREF(type);
+	Py_XDECREF(value);
+	Py_XDECREF(traceback);
+
+	// str to LPWSTR
+	DWORD dwSize = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, 0, 0);
+	LPWSTR lpszResult = new WCHAR[dwSize];
+	MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, lpszResult, dwSize);
+
+	return lpszResult;
+}
 
 void run_python_script(LPCSTR lpszSrc, HWND hWnd)
 {
@@ -38,9 +128,25 @@ void run_python_script(LPCSTR lpszSrc, HWND hWnd)
 		}
 
 		// Pythonコードの実行
-		if (PyRun_SimpleString(lpszSrc)) {
-			PyErr_Print();
-			throw std::runtime_error("Python script error");
+		{
+			PyObject* main_dict = PyModule_GetDict(PyImport_AddModule("__main__"));
+			PyCompilerFlags flags = { 0 };
+
+			// コード実行（PyRun_StringFlags使用）
+			PyObject* result = PyRun_StringFlags(
+				lpszSrc,
+				Py_file_input,  // 実行モード（複数文）
+				main_dict,
+				main_dict,
+				&flags
+			);
+
+			if (!result) {
+				throw std::runtime_error("Python script error");
+			}
+			else {
+				Py_DECREF(result);
+			}
 		}
 
 		// 出力の取得
@@ -71,11 +177,19 @@ void run_python_script(LPCSTR lpszSrc, HWND hWnd)
 		std::lock_guard<std::mutex> lock(cout_mutex);
 		HWND hEdit = GetDlgItem(hWnd, 1001);
 		if (hEdit) {
-			DWORD dwSize = MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, 0, 0);
-			WCHAR* szResult = new WCHAR[dwSize];
-			MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, szResult, dwSize);
-			SetWindowText(hEdit, szResult);
-			delete[] szResult;
+			LPWSTR szResult = handle_python_error(lpszSrc);
+			if (szResult) {
+				SetWindowText(hEdit, szResult);
+				delete[] szResult;
+			}
+			else {
+				LPCSTR what = e.what();
+				DWORD dwSize = MultiByteToWideChar(CP_UTF8, 0, what, -1, 0, 0);
+				WCHAR* szResult = new WCHAR[dwSize];
+				MultiByteToWideChar(CP_UTF8, 0, what, -1, szResult, dwSize);
+				SetWindowText(hEdit, szResult);
+				delete[] szResult;
+			}
 		}
 	}
 
